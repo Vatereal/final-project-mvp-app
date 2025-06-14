@@ -1,91 +1,75 @@
 import pandas as pd
 import altair as alt
 import streamlit as st
-from pathlib import Path
+from sqlalchemy import create_engine, text
 
-st.set_page_config('Динамика зарплат и инфляции', layout='wide')
-DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
+st.set_page_config('Динамика зарплат и инфляции (Neon)', layout='wide')
 
-@st.cache_data
-def load_csv(name: str) -> pd.DataFrame:
-    df = pd.read_csv(DATA_DIR / f'{name}.csv', index_col=0)
-    df.columns = df.columns.astype(int)
-    return df
+engine = create_engine(st.secrets["db_url"], pool_pre_ping=True)
 
-nominal     = load_csv('nominal')
-real        = load_csv('real')
-growth_nom  = load_csv('growth_nom')
-growth_real = load_csv('growth_real')
+@st.cache_data(ttl=3600)
+def fetch(table: str) -> pd.DataFrame:
+    return pd.read_sql(text(f"SELECT * FROM {table}"), engine)
 
-YEARS   = nominal.columns.tolist()
-SECTORS = nominal.index.tolist()
+salary_nom  = fetch('salaries')
+salary_real = fetch('salaries_real')
+growth_nom  = fetch('growth_nom')
+growth_real = fetch('growth_real')
 
-st.sidebar.header('Параметры')
-selected_sectors = st.sidebar.multiselect(
-    'Отрасли', SECTORS, default=SECTORS[:3]
-)
-year_from, year_to = st.sidebar.slider(
-    'Диапазон лет', YEARS[0], YEARS[-1], (YEARS[0], YEARS[-1]), step=1
-)
+YEARS   = sorted(salary_nom.year.unique())
+SECTORS = sorted(salary_nom.sector.unique())
 
-def subset(df: pd.DataFrame, value_name: str) -> pd.DataFrame:
-    df2 = df.loc[selected_sectors, [y for y in YEARS if year_from <= y <= year_to]]
-    return (
-        df2.reset_index()
-           .melt('sector', var_name='year', value_name=value_name)
-    )
+sel_sectors = st.sidebar.multiselect('Отрасли', SECTORS, default=SECTORS[:3])
+y1, y2      = st.sidebar.slider('Диапазон лет', YEARS[0], YEARS[-1], (YEARS[0], YEARS[-1]))
 
-tab_nom, tab_real, tab_growth = st.tabs(['Номинальные', 'Реальные', 'Темпы роста'])
+def prep(df, col):
+    df2 = df[df.sector.isin(sel_sectors) & df.year.between(y1, y2)].copy()
+    return df2.rename(columns={col: 'value'})
 
-with tab_nom:
+tabs = st.tabs(['Номинальные', 'Реальные', 'Темпы роста'])
+
+with tabs[0]:
     st.subheader('Номинальная зарплата, ₽')
-    data = subset(nominal, 'salary')
-    chart = (
-        alt.Chart(data)
-           .mark_line(point=True)
+    df = prep(salary_nom, 'salary_nom')
+    st.altair_chart(
+        alt.Chart(df).mark_line(point=True)
            .encode(
-               x='year:O',
-               y='salary:Q',
+               x='year:O', y=alt.Y('value:Q', title='₽'),
                color='sector:N',
-               tooltip=['sector','year',alt.Tooltip('salary',format=',.0f')]
+               tooltip=['sector','year',alt.Tooltip('value:Q',format=',.0f')]
            )
-           .interactive()
+           .interactive(),
+        use_container_width=True
     )
-    st.altair_chart(chart, use_container_width=True)
 
-with tab_real:
+with tabs[1]:
     st.subheader('Реальная зарплата (цены 2000 г.)')
-    data = subset(real, 'salary_real')
-    chart = (
-        alt.Chart(data)
-           .mark_line(point=True)
+    df = prep(salary_real, 'salary_real')
+    st.altair_chart(
+        alt.Chart(df).mark_line(point=True)
            .encode(
-               x='year:O',
-               y='salary_real:Q',
+               x='year:O', y=alt.Y('value:Q', title='₽ 2000 г.'),
                color='sector:N',
-               tooltip=['sector','year',alt.Tooltip('salary_real',format=',.0f')]
+               tooltip=['sector','year',alt.Tooltip('value:Q',format=',.0f')]
            )
-           .interactive()
+           .interactive(),
+        use_container_width=True
     )
-    st.altair_chart(chart, use_container_width=True)
 
-with tab_growth:
+with tabs[2]:
     st.subheader('Темпы роста, % к предыдущему году')
-    dn = subset(growth_nom, 'growth');  dn['type']='номинальная'
-    dr = subset(growth_real,'growth');  dr['type']='реальная'
-    data = pd.concat([dn, dr])
-    chart = (
-        alt.Chart(data)
-           .mark_line(point=True)
+    nom = prep(growth_nom, 'growth_nom'); nom['type'] = 'номинальная'
+    rea = prep(growth_real,'growth_real'); rea['type'] = 'реальная'
+    df = pd.concat([nom, rea])
+    st.altair_chart(
+        alt.Chart(df).mark_line(point=True)
            .encode(
-               x='year:O',
-               y='growth:Q',
-               color='sector:N',
-               strokeDash='type:N',
-               tooltip=['sector','type','year',alt.Tooltip('growth',format='.1f')]
+               x='year:O', y=alt.Y('value:Q', title='%'),
+               color='sector:N', strokeDash='type:N',
+               tooltip=['sector','type','year',alt.Tooltip('value:Q',format='.1f')]
            )
-           .interactive()
+           .interactive(),
+        use_container_width=True
     )
-    st.altair_chart(chart, use_container_width=True)
 
-st.caption('Данные: Росстат')
+st.caption('Источник: Росстат • Хранилище: Neon PostgreSQL')
